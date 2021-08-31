@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/mitchellh/colorstring"
 )
 
 const (
@@ -26,7 +28,7 @@ const (
 type Instruction struct {
 	Type    byte
 	Data    int
-	AuxData int
+	AuxData uint16
 }
 
 var filename string
@@ -72,12 +74,28 @@ func processBalanced(s string, char1 string, char2 string) string {
 	}
 }
 
-func compile(code string) *[]Instruction {
+const (
+	Info byte = iota
+	Warning
+	Error
+)
+
+func parseMessage(code string, charRange [2]int, message string, msgType byte) {
+	fmt.Printf("Char %d:%d ; ", charRange[0], charRange[1])
+	switch msgType {
+	case Info:
+		colorstring.Print("[_blue_]INFO[_default_]")
+	}
+}
+
+func compile(code string) (*[]Instruction, bool) {
 	defer elapsed(0)()
 	// Optimize
 	// Remove useless characters
 	var dummyChars = regexp.MustCompile(`[^\+\-\>\<\.\,\]\[]`)
 	code = dummyChars.ReplaceAllString(code, "")
+
+	//parseMessage(code, [2]int{0, 1}, "asdf", Info)
 
 	// Remove NOPs
 	var nopAddSub = regexp.MustCompile(`[+-]{2,}`)
@@ -114,14 +132,13 @@ func compile(code string) *[]Instruction {
 	// Basic multiloops/copyloops optimization (won't optimize more complicated ones for now)
 	var copyloopCounter int
 	var copyloopMap = make([]int, 0)
-	var copyloopMulMap = make([]int, 0)
+	var copyloopMulMap = make([]uint16, 0)
 	var copyloop = regexp.MustCompile(`\[-[<>]+\++[<>]+\]`)
 	code = copyloop.ReplaceAllStringFunc(code, func(s string) string {
-		var balancedMove = strings.Count(s, ">")-strings.Count(s, "<") == 0
-		if balancedMove {
+		if strings.Count(s, ">")-strings.Count(s, "<") == 0 {
 			var tempRegex = regexp.MustCompile(`[<>]+`).FindString(s)
 			copyloopMap = append(copyloopMap, -strings.Count(tempRegex, "<")+strings.Count(tempRegex, ">"))
-			copyloopMulMap = append(copyloopMulMap, strings.Count(s, "+"))
+			copyloopMulMap = append(copyloopMulMap, uint16(strings.Count(s, "+")))
 			return "P"
 		} else {
 			return s
@@ -170,15 +187,20 @@ func compile(code string) *[]Instruction {
 		instructions = append(instructions, newInstruction)
 	}
 
-	// TODO: Good ass error messages
-	/*if len(tBraceStack) != 0 {
+	// *WIP*: Good error messages
+	if len(tBraceStack) != 0 {
 		fmt.Println("ERROR: No closing bracket")
-	}*/
+		return nil, true
+	}
 
-	return &instructions
+	return &instructions, false
 }
 
-func execute(cells *[]byte, cellptr *int, instructions *[]Instruction) {
+func execute(cells *[]byte, cellptr *int, code string) {
+	var instructions, err = compile(code)
+	if err {
+		return
+	}
 	if trackStatistics {
 		defer printStatistics()
 	}
@@ -215,7 +237,7 @@ func execute(cells *[]byte, cellptr *int, instructions *[]Instruction) {
 		case MUL_CPY:
 			optInstructionCount++
 			if *currentCell != 0 {
-				(*cells)[*cellptr+currentInstruction.Data] = byte(int((*cells)[*cellptr+currentInstruction.Data]) + int(*currentCell)*currentInstruction.AuxData)
+				(*cells)[*cellptr+currentInstruction.Data] = byte(int((*cells)[*cellptr+currentInstruction.Data]) + int(*currentCell)*int(currentInstruction.AuxData))
 				*currentCell = 0
 			}
 		case SCN_RGT:
@@ -258,7 +280,7 @@ func main() {
 		var data, err = os.ReadFile(filename)
 		if err == nil {
 			var code = string(data)
-			execute(&cells, &cellptr, compile(code))
+			execute(&cells, &cellptr, code)
 		} else {
 			fmt.Println("ERROR:", err)
 		}
@@ -271,14 +293,13 @@ func main() {
 		fmt.Println(`  \_____|\____/ \____/|_|     `)
 		fmt.Println("")
 		fmt.Println("Goof - an optimizing bf VM written in Go")
-		fmt.Println("Version 1.0")
+		fmt.Println("Version 1.0.1")
 		fmt.Println("Collect statistics: ", trackStatistics)
 		fmt.Println("Memory cells available: ", memorySize)
 		for true {
 			fmt.Print(">>> ")
-			var in = bufio.NewReader(os.Stdin)
-			var repl, _ = in.ReadString('\n')
-			execute(&cells, &cellptr, compile(repl))
+			var repl, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+			execute(&cells, &cellptr, repl)
 		}
 	}
 }
