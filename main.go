@@ -84,8 +84,11 @@ func parseMessage(code string, charRange [2]int, message string, msgType byte) {
 	fmt.Printf("Char %d:%d ; ", charRange[0], charRange[1])
 	switch msgType {
 	case Info:
-		colorstring.Print("[_blue_]INFO[_default_]")
+		colorstring.Print("[_blue_]INFO:[_default_] ")
+	case Error:
+		colorstring.Print("[_red_]ERROR:[_default_] ")
 	}
+	fmt.Println(message)
 }
 
 func compile(code string) (*[]Instruction, bool) {
@@ -95,15 +98,13 @@ func compile(code string) (*[]Instruction, bool) {
 	var dummyChars = regexp.MustCompile(`[^\+\-\>\<\.\,\]\[]`)
 	code = dummyChars.ReplaceAllString(code, "")
 
-	//parseMessage(code, [2]int{0, 1}, "asdf", Info)
-
 	// Remove NOPs
 	var nopAddSub = regexp.MustCompile(`[+-]{2,}`)
 	var nopRgtLft = regexp.MustCompile(`[><]{2,}`)
 	code = nopAddSub.ReplaceAllStringFunc(code, func(s string) string { return processBalanced(s, "+", "-") })
 	code = nopRgtLft.ReplaceAllStringFunc(code, func(s string) string { return processBalanced(s, ">", "<") })
 
-	// Clearloop optimization
+	// Clearloop optimizations
 	var clearloop = regexp.MustCompile(`[+-]*(?:\[[+-]+\])+`) // Also delete any modifications to cell that is being cleared
 	code = clearloop.ReplaceAllString(code, "C")
 
@@ -164,6 +165,10 @@ func compile(code string) (*[]Instruction, bool) {
 			tBraceStack = append(tBraceStack, len(instructions))
 			newInstruction = Instruction{JMP_ZER, 0, 0}
 		case ']':
+			if len(tBraceStack) == 0 {
+				parseMessage(code, [2]int{i, i}, "Extra loop close bracket", Error)
+				return nil, true
+			}
 			start := tBraceStack[len(tBraceStack)-1]
 			tBraceStack = tBraceStack[:len(tBraceStack)-1]
 			instructions[start].Data = len(instructions)
@@ -189,7 +194,9 @@ func compile(code string) (*[]Instruction, bool) {
 
 	// *WIP*: Good error messages
 	if len(tBraceStack) != 0 {
-		fmt.Println("ERROR: No closing bracket")
+		for x := 0; x < len(tBraceStack); x++ {
+			parseMessage(code, [2]int{tBraceStack[x], tBraceStack[x]}, "Missing loop close bracket", Error)
+		}
 		return nil, true
 	}
 
@@ -282,7 +289,7 @@ func main() {
 			var code = string(data)
 			execute(&cells, &cellptr, code)
 		} else {
-			fmt.Println("ERROR:", err)
+			colorstring.Println("[_red_]ERROR:[_default_] " + err.Error())
 		}
 	} else {
 		fmt.Println(`   _____  ____   ____  ______ `)
