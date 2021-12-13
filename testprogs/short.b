@@ -23,9 +23,6 @@ work with EOF->"no change" as well.)
 >,[>,]<[.<]
 Reverse input.
 
-unmatched [.
-A Kimian quine, for my implementation.
-
 ,[---------[-[++++++++++.[-]]],]
 Strip tabs and linefeeds.
 
