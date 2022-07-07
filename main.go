@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"strings"
@@ -65,9 +66,9 @@ func elapsed(what int) func() {
 	}
 }
 
-func fold(code string, i *int, char byte) int {
+func fold(code *string, i *int, char byte) int {
 	var count = 1
-	for *i < stringLength-1 && (code)[*i+1] == char {
+	for *i < stringLength-1 && (*code)[*i+1] == char {
 		count++
 		*i++
 	}
@@ -86,8 +87,7 @@ func processBalanced(s string, char1 string, char2 string) string {
 	}
 }
 
-func parseMessage(code string, charRange [2]int, message string, msgType byte) {
-	fmt.Printf("Char %d:%d ; ", charRange[0], charRange[1])
+func parseMessage(code string, message string, msgType byte) {
 	switch msgType {
 	case Info:
 		colorstring.Print("[blue]INFO:[default] ")
@@ -109,7 +109,7 @@ func dumpMem(cells *[]byte, cellptr *int) {
 	}
 	fmt.Println("         000 001 002 003 004 005 006 007 008 009")
 	var row = 0
-	for x := 0; x <= lastNonEmpty; x++ {
+	for x := 0; x <= int(math.Max(float64(lastNonEmpty), float64(*cellptr))); x++ {
 		if x%10 == 0 {
 			if row != 0 {
 				fmt.Print("\n")
@@ -126,18 +126,18 @@ func dumpMem(cells *[]byte, cellptr *int) {
 	fmt.Println("")
 }
 
-func compile(code string) (*[]Instruction, bool) {
+func compile(code *string) (*[]Instruction, bool) {
 	defer elapsed(0)()
 	//* Optimize
 	// Remove useless characters
 	var dummyChars = regexp.MustCompile(`[^\+\-\>\<\.\,\]\[]`)
-	code = dummyChars.ReplaceAllString(code, "")
+	*code = dummyChars.ReplaceAllString(*code, "")
 
 	// Remove NOPs
 	var nopAddSub = regexp.MustCompile(`[+-]{2,}`)
 	var nopRgtLft = regexp.MustCompile(`[><]{2,}`)
-	code = nopAddSub.ReplaceAllStringFunc(code, func(s string) string { return processBalanced(s, "+", "-") })
-	code = nopRgtLft.ReplaceAllStringFunc(code, func(s string) string { return processBalanced(s, ">", "<") })
+	*code = nopAddSub.ReplaceAllStringFunc(*code, func(s string) string { return processBalanced(s, "+", "-") })
+	*code = nopRgtLft.ReplaceAllStringFunc(*code, func(s string) string { return processBalanced(s, ">", "<") })
 
 	var copyloopCounter int
 	var copyloopMap = make([]int, 0)
@@ -149,31 +149,34 @@ func compile(code string) (*[]Instruction, bool) {
 	for z := 0; z < optPasses; z++ {
 		// Clearloop optimization
 		var clearloop = regexp.MustCompile(`[C+-]*(?:\[[+-]+\])+\.*`) // Also delete any modifications to cell that is being cleared
-		code = clearloop.ReplaceAllString(code, "C")
+		*code = clearloop.ReplaceAllString(*code, "C")
 
 		// Scanloop optimization
 		var scanloopRight = regexp.MustCompile(`\[>+\]`)
 		var scanloopLeft = regexp.MustCompile(`\[<+\]`)
-		code = scanloopRight.ReplaceAllStringFunc(code, func(s string) string {
+		*code = scanloopRight.ReplaceAllStringFunc(*code, func(s string) string {
 			scanloopMap = append(scanloopMap, strings.Count(s, ">"))
 			return "R"
 		})
-		code = scanloopLeft.ReplaceAllStringFunc(code, func(s string) string {
+		*code = scanloopLeft.ReplaceAllStringFunc(*code, func(s string) string {
 			scanloopMap = append(scanloopMap, strings.Count(s, "<"))
 			return "L"
 		})
 
 		// Don't clear or print if cell is known zero
 		var noClearPrint = regexp.MustCompile(`[RL]+C|[CRL]+\.+`)
-		code = noClearPrint.ReplaceAllString(code, "")
+		*code = noClearPrint.ReplaceAllString(*code, "")
 
 		// Don't update cells if they are immediately overwritten by stdin
 		var overwrite = regexp.MustCompile(`[+-C]+,`)
-		code = overwrite.ReplaceAllString(code, ",")
+		*code = overwrite.ReplaceAllString(*code, ",")
+
+		var nopLoop = regexp.MustCompile(`\[+\]+`)
+		*code = nopLoop.ReplaceAllString(*code, "")
 
 		// Multiloops/copyloops optimization
 		var copyloop = regexp.MustCompile(`\[-(?:[<>]+\++)+[<>]+\]|\[(?:[<>]+\++)+[<>]+-\]`)
-		code = copyloop.ReplaceAllStringFunc(code, func(s string) string {
+		*code = copyloop.ReplaceAllStringFunc(*code, func(s string) string {
 			var numOfCopies int = 0
 			var offset int = 0
 			if strings.Count(s, ">")-strings.Count(s, "<") == 0 {
@@ -193,12 +196,12 @@ func compile(code string) (*[]Instruction, bool) {
 	}
 
 	// Compile & link loops
-	stringLength = len(code)
+	stringLength = len(*code)
 	var instructions = make([]Instruction, 0)
 	var tBraceStack = make([]int, 0)
 	for i := 0; i < stringLength; i++ {
 		var newInstruction Instruction
-		switch code[i] {
+		switch (*code)[i] {
 		case '+':
 			newInstruction = Instruction{ADD_SUB, fold(code, &i, '+'), 0}
 		case '-':
@@ -212,7 +215,7 @@ func compile(code string) (*[]Instruction, bool) {
 			newInstruction = Instruction{JMP_ZER, 0, 0}
 		case ']':
 			if len(tBraceStack) == 0 {
-				parseMessage(code, [2]int{i, i}, "Extra loop close bracket", Error)
+				parseMessage(*code, "Extra loop close bracket", Error)
 				return nil, true
 			}
 			start := tBraceStack[len(tBraceStack)-1]
@@ -241,7 +244,7 @@ func compile(code string) (*[]Instruction, bool) {
 	// *WIP*: Good error messages
 	if len(tBraceStack) != 0 {
 		for x := 0; x < len(tBraceStack); x++ {
-			parseMessage(code, [2]int{tBraceStack[x], tBraceStack[x]}, "Missing loop close bracket", Error)
+			parseMessage(*code, "Missing loop close bracket", Error)
 		}
 		return nil, true
 	}
@@ -249,7 +252,7 @@ func compile(code string) (*[]Instruction, bool) {
 	return &instructions, false
 }
 
-func execute(cells *[]byte, cellptr *int, code string) {
+func execute(cells *[]byte, cellptr *int, code *string) {
 	var instructions, err = compile(code)
 	if err {
 		return
@@ -264,7 +267,8 @@ func execute(cells *[]byte, cellptr *int, code string) {
 	instructionCount = 0
 	optInstructionCount = 0
 	var waitTime time.Time
-	for i, length := 0, len(*instructions); i < length; i++ {
+	var instructionLength = len(*instructions)
+	for i := 0; i < instructionLength; i++ {
 		var currentCell = &(*cells)[*cellptr]
 		var currentInstruction = (*instructions)[i]
 
@@ -284,7 +288,7 @@ func execute(cells *[]byte, cellptr *int, code string) {
 		case PUT_CHR:
 			fmt.Print(strings.Repeat(string(*currentCell), currentInstruction.Data))
 		case RAD_CHR:
-			// TODO: Fix this mess
+			// TODO: Fix this
 			var b = make([]byte, 1)
 			waitTime = time.Now()
 			os.Stdin.Read(b)
@@ -300,15 +304,11 @@ func execute(cells *[]byte, cellptr *int, code string) {
 			}
 		case SCN_RGT:
 			optInstructionCount++
-			if *currentCell != 0 {
-				for ; *cellptr < memorySize && (*cells)[*cellptr] != 0; *cellptr += currentInstruction.Data {
-				}
+			for ; *cellptr < memorySize && (*cells)[*cellptr] != 0; *cellptr += currentInstruction.Data {
 			}
 		case SCN_LFT:
 			optInstructionCount++
-			if *currentCell != 0 {
-				for ; *cellptr > 0 && (*cells)[*cellptr] != 0; *cellptr -= currentInstruction.Data {
-				}
+			for ; *cellptr > 0 && (*cells)[*cellptr] != 0; *cellptr -= currentInstruction.Data {
 			}
 		}
 		instructionCount++
@@ -341,7 +341,7 @@ func main() {
 		var data, err = os.ReadFile(filename)
 		if err == nil {
 			var code = string(data)
-			execute(&cells, &cellptr, code)
+			execute(&cells, &cellptr, &code)
 			fmt.Println("--------------------------------------------------------------------")
 			if dumpMemory {
 				dumpMem(&cells, &cellptr)
@@ -382,7 +382,7 @@ func main() {
 			} else if strings.HasPrefix(repl, "viewmem") {
 				dumpMem(&cells, &cellptr)
 			} else {
-				execute(&cells, &cellptr, repl)
+				execute(&cells, &cellptr, &repl)
 			}
 		}
 	}
