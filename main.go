@@ -27,17 +27,11 @@ const (
 	SCN_LFT
 )
 
-// Message types
-const (
-	Info byte = iota
-	Warning
-	Error
-)
-
 type Instruction struct {
 	Type    byte
 	Data    int
 	AuxData int
+	Offset  int
 }
 
 var filename string
@@ -87,18 +81,6 @@ func processBalanced(s string, char1 string, char2 string) string {
 	}
 }
 
-func parseMessage(code string, message string, msgType byte) {
-	switch msgType {
-	case Info:
-		colorstring.Print("[blue]INFO:[default] ")
-	case Warning:
-		colorstring.Print("[yellow]WARNING:[default] ")
-	case Error:
-		colorstring.Print("[red]ERROR:[default] ")
-	}
-	fmt.Println(message)
-}
-
 func dumpMem(cells *[]byte, cellptr *int) {
 	var lastNonEmpty = 0
 	for x := len(*cells) - 1; x > 0; x-- {
@@ -112,7 +94,7 @@ func dumpMem(cells *[]byte, cellptr *int) {
 	for x := 0; x <= int(math.Max(float64(lastNonEmpty), float64(*cellptr))); x++ {
 		if x%10 == 0 {
 			if row != 0 {
-				fmt.Print("\n")
+				fmt.Println()
 			}
 			fmt.Print(row, strings.Repeat(" ", 9-len(fmt.Sprint(row))))
 			row = row + 10
@@ -123,10 +105,10 @@ func dumpMem(cells *[]byte, cellptr *int) {
 			fmt.Print((*cells)[x], strings.Repeat(" ", 4-len(fmt.Sprint((*cells)[x]))))
 		}
 	}
-	fmt.Println("")
+	fmt.Println()
 }
 
-func compile(code *string) (*[]Instruction, bool) {
+func compile(code *string) ([]Instruction, bool) {
 	defer elapsed(0)()
 	//* Optimize
 	// Remove useless characters
@@ -152,7 +134,8 @@ func compile(code *string) (*[]Instruction, bool) {
 		*code = clearloop.ReplaceAllString(*code, "C")
 
 		// Scanloop optimization
-		var scanloopRight = regexp.MustCompile(`\[>+\]`)
+		// TODO: Make it work with offset ops
+		/*var scanloopRight = regexp.MustCompile(`\[>+\]`)
 		var scanloopLeft = regexp.MustCompile(`\[<+\]`)
 		*code = scanloopRight.ReplaceAllStringFunc(*code, func(s string) string {
 			scanloopMap = append(scanloopMap, strings.Count(s, ">"))
@@ -161,7 +144,7 @@ func compile(code *string) (*[]Instruction, bool) {
 		*code = scanloopLeft.ReplaceAllStringFunc(*code, func(s string) string {
 			scanloopMap = append(scanloopMap, strings.Count(s, "<"))
 			return "L"
-		})
+		})*/
 
 		// Don't clear or print if cell is known zero
 		var noClearPrint = regexp.MustCompile(`[RL]+C|[CRL]+\.+`)
@@ -187,69 +170,170 @@ func compile(code *string) (*[]Instruction, bool) {
 					copyloopMulMap = append(copyloopMulMap, strings.Count(v, "+"))
 					numOfCopies++
 				}
-				s1 := fmt.Sprintf("%sC", strings.Repeat("P", numOfCopies))
-				return s1
+				return fmt.Sprintf("%sC", strings.Repeat("P", numOfCopies))
 			} else {
 				return s
 			}
 		})
 	}
 
-	// Compile & link loops
+	// Offset ops
+	// Complicated but works (?)
+
+	*code = "A" + *code
+
 	stringLength = len(*code)
+	var offsetCalc = ""
+	var offsets = [][]int{}
+	var offsetRow = 0
+	var offsetIndex = 0
+	var depth = 0
+
+	for i := 0; i < stringLength; i++ {
+		if (*code)[i] == '[' {
+			if depth == 0 {
+				offsetCalc += "E"
+			}
+			depth++
+		} else if (*code)[i] == ']' {
+			depth--
+			if depth == 0 {
+				offsetCalc += "A"
+			}
+		} else if depth == 0 {
+			offsetCalc += string((*code)[i])
+		}
+	}
+	fmt.Println(offsetCalc)
+
+	var split = regexp.MustCompile(`E`).Split(offsetCalc, -1)
+	for _, v := range split {
+		fmt.Println(v)
+		var tempSplice = []int{}
+		var secondSplit = regexp.MustCompile(`(?:>+|<+|A[^$])[^<>]*`).FindAllString(v, -1)
+		var lastOffset = 0
+		for _, v2 := range secondSplit {
+			if v2 != "A" {
+				fmt.Println(v2)
+				lastOffset += strings.Count(v2, ">") - strings.Count(v2, "<")
+				for _, v3 := range regexp.MustCompile(`[^A<>PC]+|[PC]`).FindAllString(v2, -1) {
+					for j := 0; j < len(v3)-1; j++ {
+						if v3[j+1] != v3[j] {
+							tempSplice = append(tempSplice, lastOffset)
+						}
+					}
+				}
+				for i := 0; i < len(regexp.MustCompile(`[^A<>PC]+|[PC]`).FindAllString(v2, -1)); i++ {
+					tempSplice = append(tempSplice, lastOffset)
+				}
+			}
+		}
+		if len(tempSplice) == 0 {
+			tempSplice = append(tempSplice, lastOffset)
+		}
+
+		offsets = append(offsets, tempSplice)
+	}
+
+	fmt.Println(offsets)
+	// Link loops & compile
 	var instructions = make([]Instruction, 0)
 	var tBraceStack = make([]int, 0)
 	for i := 0; i < stringLength; i++ {
 		var newInstruction Instruction
-		switch (*code)[i] {
-		case '+':
-			newInstruction = Instruction{ADD_SUB, fold(code, &i, '+'), 0}
-		case '-':
-			newInstruction = Instruction{ADD_SUB, -fold(code, &i, '-'), 0}
-		case '>':
-			newInstruction = Instruction{PTR_MOV, fold(code, &i, '>'), 0}
-		case '<':
-			newInstruction = Instruction{PTR_MOV, -fold(code, &i, '<'), 0}
-		case '[':
-			tBraceStack = append(tBraceStack, len(instructions))
-			newInstruction = Instruction{JMP_ZER, 0, 0}
-		case ']':
-			if len(tBraceStack) == 0 {
-				parseMessage(*code, "Extra loop close bracket", Error)
-				return nil, true
+		if offsetRow < len(offsets)-1 && offsetIndex == len(offsets[offsetRow])-1 && i != stringLength-1 {
+			if offsetIndex != 0 {
+				newInstruction = Instruction{PTR_MOV, offsets[offsetRow][offsetIndex], 0, 0}
 			}
-			start := tBraceStack[len(tBraceStack)-1]
-			tBraceStack = tBraceStack[:len(tBraceStack)-1]
-			instructions[start].Data = len(instructions)
-			newInstruction = Instruction{JMP_NOT_ZER, start, 0}
-		case '.':
-			newInstruction = Instruction{PUT_CHR, fold(code, &i, '.'), 0}
-		case ',':
-			newInstruction = Instruction{RAD_CHR, 0, 0}
-		case 'C':
-			newInstruction = Instruction{CLR, 0, 0}
-		case 'P':
-			newInstruction = Instruction{MUL_CPY, copyloopMap[copyloopCounter], copyloopMulMap[copyloopCounter]}
-			copyloopCounter++
-		case 'R':
-			newInstruction = Instruction{SCN_RGT, scanloopMap[scanloopCounter], 0}
-			scanloopCounter++
-		case 'L':
-			newInstruction = Instruction{SCN_LFT, scanloopMap[scanloopCounter], 0}
-			scanloopCounter++
+			offsetRow++
+			offsetIndex = 0
+			i--
+		} else {
+			switch (*code)[i] {
+			case '+':
+				if len(tBraceStack) == 0 {
+					newInstruction = Instruction{ADD_SUB, fold(code, &i, '+'), 0, offsets[offsetRow][offsetIndex]}
+					offsetIndex++
+				} else {
+					newInstruction = Instruction{ADD_SUB, fold(code, &i, '+'), 0, 0}
+				}
+			case '-':
+				if len(tBraceStack) == 0 {
+					newInstruction = Instruction{ADD_SUB, -fold(code, &i, '-'), 0, offsets[offsetRow][offsetIndex]}
+					offsetIndex++
+				} else {
+					newInstruction = Instruction{ADD_SUB, -fold(code, &i, '-'), 0, 0}
+				}
+			case '>':
+				if len(tBraceStack) == 0 {
+					continue
+				}
+				newInstruction = Instruction{PTR_MOV, fold(code, &i, '>'), 0, 0}
+			case '<':
+				if len(tBraceStack) == 0 {
+					continue
+				}
+				newInstruction = Instruction{PTR_MOV, -fold(code, &i, '<'), 0, 0}
+			case '[':
+				tBraceStack = append(tBraceStack, len(instructions))
+				newInstruction = Instruction{JMP_ZER, 0, 0, 0}
+			case ']':
+				if len(tBraceStack) == 0 {
+					//parseMessage(*code, "Extra loop close bracket", Error)
+					return nil, true
+				}
+				start := tBraceStack[len(tBraceStack)-1]
+				tBraceStack = tBraceStack[:len(tBraceStack)-1]
+				instructions[start].Data = len(instructions)
+				newInstruction = Instruction{JMP_NOT_ZER, start, 0, 0}
+			case '.':
+				if len(tBraceStack) == 0 {
+					newInstruction = Instruction{PUT_CHR, fold(code, &i, '.'), 0, offsets[offsetRow][offsetIndex]}
+					offsetIndex++
+				} else {
+					newInstruction = Instruction{PUT_CHR, fold(code, &i, '.'), 0, 0}
+				}
+			case ',':
+				if len(tBraceStack) == 0 {
+					newInstruction = Instruction{RAD_CHR, 0, 0, offsets[offsetRow][offsetIndex]}
+					offsetIndex++
+				} else {
+					newInstruction = Instruction{RAD_CHR, 0, 0, 0}
+				}
+			case 'C':
+				if len(tBraceStack) == 0 {
+					newInstruction = Instruction{CLR, 0, 0, offsets[offsetRow][offsetIndex]}
+					offsetIndex++
+				} else {
+					newInstruction = Instruction{CLR, 0, 0, 0}
+				}
+			case 'P':
+				if len(tBraceStack) == 0 {
+					newInstruction = Instruction{MUL_CPY, copyloopMap[copyloopCounter], copyloopMulMap[copyloopCounter], offsets[offsetRow][offsetIndex]}
+					offsetIndex++
+				} else {
+					newInstruction = Instruction{MUL_CPY, copyloopMap[copyloopCounter], copyloopMulMap[copyloopCounter], 0}
+				}
+				copyloopCounter++
+			case 'R':
+				newInstruction = Instruction{SCN_RGT, scanloopMap[scanloopCounter], 0, 0}
+				scanloopCounter++
+			case 'L':
+				newInstruction = Instruction{SCN_LFT, scanloopMap[scanloopCounter], 0, 0}
+				scanloopCounter++
+			}
 		}
 		instructions = append(instructions, newInstruction)
 	}
 
-	// *WIP*: Good error messages
 	if len(tBraceStack) != 0 {
 		for x := 0; x < len(tBraceStack); x++ {
-			parseMessage(*code, "Missing loop close bracket", Error)
+			//parseMessage(*code, "Missing loop close bracket", Error)
 		}
-		return nil, true
+		//return nil, true
 	}
 
-	return &instructions, false
+	return instructions, false
 }
 
 func execute(cells *[]byte, cellptr *int, code *string) {
@@ -264,55 +348,60 @@ func execute(cells *[]byte, cellptr *int, code *string) {
 
 	defer elapsed(1)()
 
+	// Copy cells and the cell pointer to local variables
+	var cellptrL = *cellptr
+	var cellsL = make([]byte, len(*cells))
+	copy(cellsL, *cells)
+
 	instructionCount = 0
 	optInstructionCount = 0
-	var waitTime time.Time
-	var instructionLength = len(*instructions)
+	var instructionLength = len(instructions)
 	for i := 0; i < instructionLength; i++ {
-		var currentCell = &(*cells)[*cellptr]
-		var currentInstruction = (*instructions)[i]
+		var currentInstruction = instructions[i]
 
 		switch currentInstruction.Type {
 		case ADD_SUB:
-			*currentCell = byte(int(*currentCell) + currentInstruction.Data)
+			cellsL[cellptrL+currentInstruction.Offset] = byte(int(cellsL[cellptrL+currentInstruction.Offset]) + currentInstruction.Data)
 		case PTR_MOV:
-			*cellptr += currentInstruction.Data
+			cellptrL += currentInstruction.Data
 		case JMP_ZER:
-			if *currentCell == 0 {
+			if cellsL[cellptrL] == 0 {
 				i = currentInstruction.Data
 			}
 		case JMP_NOT_ZER:
-			if *currentCell != 0 {
+			if cellsL[cellptrL] != 0 {
 				i = currentInstruction.Data
 			}
 		case PUT_CHR:
-			fmt.Print(strings.Repeat(string(*currentCell), currentInstruction.Data))
+			fmt.Print(strings.Repeat(string(cellsL[cellptrL+currentInstruction.Offset]), currentInstruction.Data))
 		case RAD_CHR:
 			// TODO: Fix this
 			var b = make([]byte, 1)
-			waitTime = time.Now()
+			var waitTime = time.Now()
 			os.Stdin.Read(b)
 			ioWait = ioWait + time.Since(waitTime)
-			*currentCell = b[0]
+			cellsL[cellptrL+currentInstruction.Offset] = b[0]
 		case CLR:
 			optInstructionCount++
-			*currentCell = 0
+			cellsL[cellptrL+currentInstruction.Offset] = 0
 		case MUL_CPY:
 			optInstructionCount++
-			if *currentCell != 0 {
-				(*cells)[*cellptr+currentInstruction.Data] = byte(int((*cells)[*cellptr+currentInstruction.Data]) + int(*currentCell)*currentInstruction.AuxData)
+			if cellsL[cellptrL+currentInstruction.Offset] != 0 {
+				cellsL[cellptrL+currentInstruction.Data+currentInstruction.Offset] = byte(int(cellsL[cellptrL+currentInstruction.Data+currentInstruction.Offset]) + int(cellsL[cellptrL+currentInstruction.Offset])*currentInstruction.AuxData)
 			}
 		case SCN_RGT:
 			optInstructionCount++
-			for ; *cellptr < memorySize && (*cells)[*cellptr] != 0; *cellptr += currentInstruction.Data {
+			for ; cellptrL < memorySize && cellsL[cellptrL] != 0; cellptrL += currentInstruction.Data {
 			}
 		case SCN_LFT:
 			optInstructionCount++
-			for ; *cellptr > 0 && (*cells)[*cellptr] != 0; *cellptr -= currentInstruction.Data {
+			for ; cellptrL > 0 && cellsL[cellptrL] != 0; cellptrL -= currentInstruction.Data {
 			}
 		}
 		instructionCount++
 	}
+	copy(*cells, cellsL)
+	*cellptr = cellptrL
 }
 
 func printStatistics() {
@@ -356,15 +445,12 @@ func main() {
 		fmt.Println(` | | |_ | |  | | |  | |  __|  `)
 		fmt.Println(` | |__| | |__| | |__| | |     `)
 		fmt.Println(`  \_____|\____/ \____/|_|     `)
-		fmt.Println("")
+		fmt.Println()
 		fmt.Println("Goof - an optimizing bf VM written in Go")
-		fmt.Println("Version 1.0.2 (REPL mode)")
+		fmt.Println("Version 1.0.3 (REPL mode)")
 		fmt.Println("Collect statistics: ", trackStatistics)
 		fmt.Println("Memory cells available: ", memorySize)
 		colorstring.Println("Type [blue]help[default] to see available commands.")
-		if memorySize <= 64 { // Probably useless but whatever
-			colorstring.Println("[yellow]WARNING:[default] Memory might be too small!")
-		}
 
 		for true {
 			fmt.Print(">>> ")
