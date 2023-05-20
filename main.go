@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"math"
 	"os"
 	"regexp"
 	"strings"
@@ -15,60 +14,30 @@ import (
 
 // Instruction types
 const (
-	ADD_SUB byte = iota
-	PTR_MOV
-	JMP_ZER
-	JMP_NOT_ZER
-	PUT_CHR
-	RAD_CHR
-	CLR
-	MUL_CPY
-	SCN_RGT
-	SCN_LFT
-)
-
-// Message types
-const (
-	Info byte = iota
-	Warning
-	Error
+	ADD_SUB     int = iota // +/-
+	PTR_MOV                // </>
+	JMP_ZER                // [
+	JMP_NOT_ZER            // ]
+	PUT_CHR                // .
+	RAD_CHR                // ,
+	CLR                    // [-]
+	MUL_CPY                // [-<++>]
+	SCN_RGT                // [>]
+	SCN_LFT                // [<]
 )
 
 type Instruction struct {
-	Type    byte
+	Type    int
 	Data    int
 	AuxData int
+	Offset  int
 }
 
-var filename string
-var memorySize int
-var trackStatistics bool
-var dumpMemory bool
-var optPasses int
-
-var instructionCount int
-var optInstructionCount int
-var stringLength int
-
-var preprocessorTime time.Duration
-var interpreterTime time.Duration
-var ioWait time.Duration
-
-func elapsed(what int) func() {
-	var start = time.Now()
-	return func() {
-		switch what {
-		case 0:
-			preprocessorTime = time.Since(start)
-		case 1:
-			interpreterTime = time.Since(start) - ioWait
-		}
-	}
-}
+// Utility functions
 
 func fold(code *string, i *int, char byte) int {
-	var count = 1
-	for *i < stringLength-1 && (*code)[*i+1] == char {
+	var count int = 1
+	for *i < len(*code)-1 && (*code)[*i+1] == char {
 		count++
 		*i++
 	}
@@ -76,8 +45,8 @@ func fold(code *string, i *int, char byte) int {
 	return count
 }
 
-func processBalanced(s string, char1 string, char2 string) string {
-	var total = strings.Count(s, char1) - strings.Count(s, char2)
+func processBalanced(s, char1, char2 string) string {
+	var total int = strings.Count(s, char1) - strings.Count(s, char2)
 	if total > 0 {
 		return strings.Repeat(char1, total)
 	} else if total < 0 {
@@ -87,35 +56,33 @@ func processBalanced(s string, char1 string, char2 string) string {
 	}
 }
 
-func parseMessage(code string, message string, msgType byte) {
-	switch msgType {
-	case Info:
-		colorstring.Print("[blue]INFO:[default] ")
-	case Warning:
-		colorstring.Print("[yellow]WARNING:[default] ")
-	case Error:
-		colorstring.Print("[red]ERROR:[default] ")
+func max(x, y int) int {
+	if x > y {
+		return x
 	}
-	fmt.Println(message)
+	return y
 }
 
+// Main code
+
 func dumpMem(cells *[]byte, cellptr *int) {
-	var lastNonEmpty = 0
+	var lastNonEmpty int = 0
 	for x := len(*cells) - 1; x > 0; x-- {
 		if (*cells)[x] != 0 {
 			lastNonEmpty = x
 			break
 		}
 	}
-	fmt.Println("         000 001 002 003 004 005 006 007 008 009")
-	var row = 0
-	for x := 0; x <= int(math.Max(float64(lastNonEmpty), float64(*cellptr))); x++ {
+	fmt.Println("Memory dump:")
+	colorstring.Println("[underline]         0   1   2   3   4   5   6   7   8   9[default]")
+	var row int = 0
+	for x := 0; x <= max(lastNonEmpty, *cellptr); x++ {
 		if x%10 == 0 {
 			if row != 0 {
-				fmt.Print("\n")
+				fmt.Println()
 			}
 			fmt.Print(row, strings.Repeat(" ", 9-len(fmt.Sprint(row))))
-			row = row + 10
+			row += 10
 		}
 		if x == *cellptr {
 			colorstring.Printf("[green]%d[default]%s", (*cells)[x], strings.Repeat(" ", 4-len(fmt.Sprint((*cells)[x]))))
@@ -123,21 +90,19 @@ func dumpMem(cells *[]byte, cellptr *int) {
 			fmt.Print((*cells)[x], strings.Repeat(" ", 4-len(fmt.Sprint((*cells)[x]))))
 		}
 	}
-	fmt.Println("")
+	fmt.Println()
 }
 
-func compile(code *string) (*[]Instruction, bool) {
-	defer elapsed(0)()
+func execute(cells *[]byte, cellptr *int, code string, printStats bool, dumpMemory bool, optimize bool) int {
+	var start = time.Now()
+
 	//* Optimize
 	// Remove useless characters
-	var dummyChars = regexp.MustCompile(`[^\+\-\>\<\.\,\]\[]`)
-	*code = dummyChars.ReplaceAllString(*code, "")
+	code = regexp.MustCompile(`[^\+\-\>\<\.\,\]\[]`).ReplaceAllString(code, "")
 
 	// Remove NOPs
-	var nopAddSub = regexp.MustCompile(`[+-]{2,}`)
-	var nopRgtLft = regexp.MustCompile(`[><]{2,}`)
-	*code = nopAddSub.ReplaceAllStringFunc(*code, func(s string) string { return processBalanced(s, "+", "-") })
-	*code = nopRgtLft.ReplaceAllStringFunc(*code, func(s string) string { return processBalanced(s, ">", "<") })
+	code = regexp.MustCompile(`[+-]{2,}`).ReplaceAllStringFunc(code, func(s string) string { return processBalanced(s, "+", "-") })
+	code = regexp.MustCompile(`[><]{2,}`).ReplaceAllStringFunc(code, func(s string) string { return processBalanced(s, ">", "<") })
 
 	var copyloopCounter int
 	var copyloopMap = make([]int, 0)
@@ -146,49 +111,38 @@ func compile(code *string) (*[]Instruction, bool) {
 	var scanloopCounter int
 	var scanloopMap = make([]int, 0)
 
-	for z := 0; z < optPasses; z++ {
+	if optimize {
 		// Clearloop optimization
-		var clearloop = regexp.MustCompile(`[C+-]*(?:\[[+-]+\])+\.*`) // Also delete any modifications to cell that is being cleared
-		*code = clearloop.ReplaceAllString(*code, "C")
+		code = regexp.MustCompile(`[C+-]*(?:\[[+-]+\])+\.*`).ReplaceAllString(code, "C") // Also delete any modifications to cell that is being cleared
 
 		// Scanloop optimization
-		var scanloopRight = regexp.MustCompile(`\[>+\]`)
-		var scanloopLeft = regexp.MustCompile(`\[<+\]`)
-		*code = scanloopRight.ReplaceAllStringFunc(*code, func(s string) string {
+		code = regexp.MustCompile(`\[>+\]`).ReplaceAllStringFunc(code, func(s string) string {
 			scanloopMap = append(scanloopMap, strings.Count(s, ">"))
 			return "R"
 		})
-		*code = scanloopLeft.ReplaceAllStringFunc(*code, func(s string) string {
+		code = regexp.MustCompile(`\[<+\]`).ReplaceAllStringFunc(code, func(s string) string {
 			scanloopMap = append(scanloopMap, strings.Count(s, "<"))
 			return "L"
 		})
 
 		// Don't clear or print if cell is known zero
-		var noClearPrint = regexp.MustCompile(`[RL]+C|[CRL]+\.+`)
-		*code = noClearPrint.ReplaceAllString(*code, "")
+		code = regexp.MustCompile(`[RL]+C|[CRL]+\.+`).ReplaceAllString(code, "")
 
 		// Don't update cells if they are immediately overwritten by stdin
-		var overwrite = regexp.MustCompile(`[+-C]+,`)
-		*code = overwrite.ReplaceAllString(*code, ",")
-
-		var nopLoop = regexp.MustCompile(`\[+\]+`)
-		*code = nopLoop.ReplaceAllString(*code, "")
+		code = regexp.MustCompile(`[+-C]+,`).ReplaceAllString(code, ",")
 
 		// Multiloops/copyloops optimization
-		var copyloop = regexp.MustCompile(`\[-(?:[<>]+\++)+[<>]+\]|\[(?:[<>]+\++)+[<>]+-\]`)
-		*code = copyloop.ReplaceAllStringFunc(*code, func(s string) string {
+		code = regexp.MustCompile(`\[-(?:[<>]+\++)+[<>]+\]|\[(?:[<>]+\++)+[<>]+-\]`).ReplaceAllStringFunc(code, func(s string) string {
 			var numOfCopies int = 0
 			var offset int = 0
 			if strings.Count(s, ">")-strings.Count(s, "<") == 0 {
-				var tempRegex = regexp.MustCompile(`[<>]+\++`)
-				for _, v := range tempRegex.FindAllString(s, -1) {
+				for _, v := range regexp.MustCompile(`[<>]+\++`).FindAllString(s, -1) {
 					offset += -strings.Count(v, "<") + strings.Count(v, ">")
 					copyloopMap = append(copyloopMap, offset)
 					copyloopMulMap = append(copyloopMulMap, strings.Count(v, "+"))
 					numOfCopies++
 				}
-				s1 := fmt.Sprintf("%sC", strings.Repeat("P", numOfCopies))
-				return s1
+				return fmt.Sprintf("%sC", strings.Repeat("P", numOfCopies))
 			} else {
 				return s
 			}
@@ -196,158 +150,174 @@ func compile(code *string) (*[]Instruction, bool) {
 	}
 
 	// Compile & link loops
-	stringLength = len(*code)
 	var instructions = make([]Instruction, 0)
-	var tBraceStack = make([]int, 0)
-	for i := 0; i < stringLength; i++ {
+	var braceStack = make([]int, 0)
+	var offset = 0
+	for i := 0; i < len(code); i++ {
 		var newInstruction Instruction
-		switch (*code)[i] {
+		switch code[i] {
 		case '+':
-			newInstruction = Instruction{ADD_SUB, fold(code, &i, '+'), 0}
+			newInstruction = Instruction{ADD_SUB, fold(&code, &i, '+'), 0, offset}
 		case '-':
-			newInstruction = Instruction{ADD_SUB, -fold(code, &i, '-'), 0}
+			newInstruction = Instruction{ADD_SUB, -fold(&code, &i, '-'), 0, offset}
 		case '>':
-			newInstruction = Instruction{PTR_MOV, fold(code, &i, '>'), 0}
-		case '<':
-			newInstruction = Instruction{PTR_MOV, -fold(code, &i, '<'), 0}
-		case '[':
-			tBraceStack = append(tBraceStack, len(instructions))
-			newInstruction = Instruction{JMP_ZER, 0, 0}
-		case ']':
-			if len(tBraceStack) == 0 {
-				parseMessage(*code, "Extra loop close bracket", Error)
-				return nil, true
+			if len(braceStack) == 0 {
+				offset += fold(&code, &i, '>')
+				continue
 			}
-			start := tBraceStack[len(tBraceStack)-1]
-			tBraceStack = tBraceStack[:len(tBraceStack)-1]
+			newInstruction = Instruction{PTR_MOV, fold(&code, &i, '>'), 0, 0}
+		case '<':
+			if len(braceStack) == 0 {
+				offset += -fold(&code, &i, '<')
+				continue
+			}
+			newInstruction = Instruction{PTR_MOV, -fold(&code, &i, '<'), 0, 0}
+		case '[':
+			if offset != 0 {
+				newInstruction = Instruction{PTR_MOV, offset, 0, 0}
+				i--
+				offset = 0
+			} else {
+				braceStack = append(braceStack, len(instructions))
+				newInstruction = Instruction{JMP_ZER, 0, 0, 0}
+			}
+		case ']':
+			if len(braceStack) == 0 {
+				return 1
+			}
+			start := braceStack[len(braceStack)-1]
+			braceStack = braceStack[:len(braceStack)-1]
 			instructions[start].Data = len(instructions)
-			newInstruction = Instruction{JMP_NOT_ZER, start, 0}
+			newInstruction = Instruction{JMP_NOT_ZER, start, 0, 0}
 		case '.':
-			newInstruction = Instruction{PUT_CHR, fold(code, &i, '.'), 0}
+			newInstruction = Instruction{PUT_CHR, fold(&code, &i, '.'), 0, offset}
 		case ',':
-			newInstruction = Instruction{RAD_CHR, 0, 0}
+			newInstruction = Instruction{RAD_CHR, 0, 0, offset}
 		case 'C':
-			newInstruction = Instruction{CLR, 0, 0}
+			newInstruction = Instruction{CLR, 0, 0, offset}
 		case 'P':
-			newInstruction = Instruction{MUL_CPY, copyloopMap[copyloopCounter], copyloopMulMap[copyloopCounter]}
+			newInstruction = Instruction{MUL_CPY, copyloopMap[copyloopCounter], copyloopMulMap[copyloopCounter], offset}
 			copyloopCounter++
 		case 'R':
-			newInstruction = Instruction{SCN_RGT, scanloopMap[scanloopCounter], 0}
-			scanloopCounter++
+			if offset != 0 {
+				newInstruction = Instruction{PTR_MOV, offset, 0, 0}
+				i--
+				offset = 0
+			} else {
+				newInstruction = Instruction{SCN_RGT, scanloopMap[scanloopCounter], 0, 0}
+				scanloopCounter++
+			}
 		case 'L':
-			newInstruction = Instruction{SCN_LFT, scanloopMap[scanloopCounter], 0}
-			scanloopCounter++
+			if offset != 0 {
+				newInstruction = Instruction{PTR_MOV, offset, 0, 0}
+				i--
+				offset = 0
+			} else {
+				newInstruction = Instruction{SCN_LFT, scanloopMap[scanloopCounter], 0, 0}
+				scanloopCounter++
+			}
 		}
 		instructions = append(instructions, newInstruction)
 	}
 
+	// Update pointer so that memory dump works even when all instructions are offset only
+	if offset != 0 {
+		instructions = append(instructions, Instruction{PTR_MOV, offset, 0, 0})
+	}
+
 	// *WIP*: Good error messages
-	if len(tBraceStack) != 0 {
-		for x := 0; x < len(tBraceStack); x++ {
-			parseMessage(*code, "Missing loop close bracket", Error)
-		}
-		return nil, true
+	if len(braceStack) != 0 {
+		/*for x := 0; x < len(tBraceStack); x++ {
+		}*/
+		return 2
 	}
 
-	return &instructions, false
-}
+	var compilerTime = time.Since(start)
 
-func execute(cells *[]byte, cellptr *int, code *string) {
-	var instructions, err = compile(code)
-	if err {
-		return
-	}
-
-	if trackStatistics {
-		defer printStatistics()
-	}
-
-	defer elapsed(1)()
-
-	instructionCount = 0
-	optInstructionCount = 0
-	var waitTime time.Time
-	var instructionLength = len(*instructions)
-	for i := 0; i < instructionLength; i++ {
-		var currentCell = &(*cells)[*cellptr]
-		var currentInstruction = (*instructions)[i]
+	var lCellptr = *cellptr
+	var lCells = *cells
+	for i := 0; i < len(instructions); i++ {
+		var currentInstruction = instructions[i]
 
 		switch currentInstruction.Type {
 		case ADD_SUB:
-			*currentCell = byte(int(*currentCell) + currentInstruction.Data)
+			lCells[lCellptr+currentInstruction.Offset] = byte(int(lCells[lCellptr+currentInstruction.Offset]) + currentInstruction.Data)
 		case PTR_MOV:
-			*cellptr += currentInstruction.Data
+			lCellptr += currentInstruction.Data
 		case JMP_ZER:
-			if *currentCell == 0 {
+			if lCells[lCellptr+currentInstruction.Offset] == 0 {
 				i = currentInstruction.Data
 			}
 		case JMP_NOT_ZER:
-			if *currentCell != 0 {
+			if lCells[lCellptr+currentInstruction.Offset] != 0 {
 				i = currentInstruction.Data
 			}
 		case PUT_CHR:
-			fmt.Print(strings.Repeat(string(*currentCell), currentInstruction.Data))
-		case RAD_CHR:
-			// TODO: Fix this
-			var b = make([]byte, 1)
-			waitTime = time.Now()
-			os.Stdin.Read(b)
-			ioWait = ioWait + time.Since(waitTime)
-			*currentCell = b[0]
+			fmt.Print(strings.Repeat(string(lCells[lCellptr+currentInstruction.Offset]), currentInstruction.Data))
+		/*case RAD_CHR:
+		// TODO: Fix this
+		var b = make([]byte, 1)
+		os.Stdin.Read(b)
+		lCells[lCellptr+currentInstruction.Offset] = b[0]*/
 		case CLR:
-			optInstructionCount++
-			*currentCell = 0
+			lCells[lCellptr+currentInstruction.Offset] = 0
 		case MUL_CPY:
-			optInstructionCount++
-			if *currentCell != 0 {
-				(*cells)[*cellptr+currentInstruction.Data] = byte(int((*cells)[*cellptr+currentInstruction.Data]) + int(*currentCell)*currentInstruction.AuxData)
+			if lCells[lCellptr+currentInstruction.Offset] != 0 {
+				lCells[lCellptr+currentInstruction.Data+currentInstruction.Offset] = byte(int(lCells[lCellptr+currentInstruction.Data+currentInstruction.Offset]) + int(lCells[lCellptr+currentInstruction.Offset])*currentInstruction.AuxData)
 			}
 		case SCN_RGT:
-			optInstructionCount++
-			for ; *cellptr < memorySize && (*cells)[*cellptr] != 0; *cellptr += currentInstruction.Data {
+			for ; lCellptr < len(lCells) && lCells[lCellptr] != 0; lCellptr += currentInstruction.Data {
 			}
 		case SCN_LFT:
-			optInstructionCount++
-			for ; *cellptr > 0 && (*cells)[*cellptr] != 0; *cellptr -= currentInstruction.Data {
+			for ; lCellptr > 0 && lCells[lCellptr] != 0; lCellptr -= currentInstruction.Data {
 			}
 		}
-		instructionCount++
 	}
-}
 
-func printStatistics() {
-	var interpreterTimeString = strings.ReplaceAll(interpreterTime.String(), "0s", "<1ns")
-	var preprocessorTimeString = strings.ReplaceAll(preprocessorTime.String(), "0s", "<1ns")
-	var ioTimeString = strings.ReplaceAll(ioWait.String(), "0s", "<1ns")
-	var totalTimeString = strings.ReplaceAll((preprocessorTime + interpreterTime + ioWait).String(), "0s", "<1ns")
+	if printStats {
+		var vmTime = time.Since(start) - compilerTime
+		fmt.Printf("Execution time: %s (VM: %s, compiler: %s)\n", (compilerTime + vmTime).String(), vmTime.String(), compilerTime.String())
+	}
 
-	fmt.Printf("\nInstructions executed: %d (optimized: %d, optimized plaintext length: %d)\n", instructionCount, optInstructionCount, stringLength)
-	fmt.Printf("Execution time: %s (VM: %s, compiler: %s) (IO wait: %s)\n", totalTimeString, interpreterTimeString, preprocessorTimeString, ioTimeString)
+	*cells = lCells
+	*cellptr = lCellptr
+
+	if dumpMemory {
+		dumpMem(cells, cellptr)
+	}
+
+	return 0
 }
 
 func main() {
+	var filename string
+	var memorySize int
+	var optimize bool
+	var printStatistics bool
+	var dumpMemory bool
+
 	flag.StringVar(&filename, "i", "", "Brainfuck file to execute")
 	flag.IntVar(&memorySize, "m", 30_000, "Set tape size")
-	flag.IntVar(&optPasses, "o", 2, "Number of optimization passes")
-	flag.BoolVar(&trackStatistics, "s", false, "Track time taken and instruction count")
+	flag.BoolVar(&optimize, "o", true, "Optimize instructions (disabling can help when encountering crashes)")
+	flag.BoolVar(&printStatistics, "s", false, "Print time taken and instruction count after execution")
 	flag.BoolVar(&dumpMemory, "dm", false, "Dump memory after execution (doesn't do anything when starting to REPL mode)")
 
 	flag.Parse()
 
-	var cellptr = 0
+	var cellptr = new(int)
 	var cells = make([]byte, memorySize)
 
 	if filename != "" {
 		var data, err = os.ReadFile(filename)
 		if err == nil {
-			var code = string(data)
-			execute(&cells, &cellptr, &code)
-			fmt.Println("--------------------------------------------------------------------")
-			if dumpMemory {
-				dumpMem(&cells, &cellptr)
+			switch execute(&cells, cellptr, string(data), printStatistics, dumpMemory, optimize) {
+			case 1:
+				colorstring.Println("[_red_]ERROR:[_default_] Unmatched close bracket")
+			case 2:
+				colorstring.Println("[_red_]ERROR:[_default_] Unmatched open bracket")
 			}
 		} else {
-			colorstring.Println("[red]ERROR:[default] " + err.Error())
+			colorstring.Println("[_red_]ERROR:[_default_] " + err.Error())
 		}
 	} else {
 		fmt.Println(`   _____  ____   ____  ______ `)
@@ -356,15 +326,11 @@ func main() {
 		fmt.Println(` | | |_ | |  | | |  | |  __|  `)
 		fmt.Println(` | |__| | |__| | |__| | |     `)
 		fmt.Println(`  \_____|\____/ \____/|_|     `)
-		fmt.Println("")
-		fmt.Println("Goof - an optimizing bf VM written in Go")
-		fmt.Println("Version 1.0.2 (REPL mode)")
-		fmt.Println("Collect statistics: ", trackStatistics)
+		fmt.Println()
+		fmt.Println("Goof - an optimizing BF VM written in Go")
+		fmt.Println("Version 1.1 (REPL mode)")
 		fmt.Println("Memory cells available: ", memorySize)
-		colorstring.Println("Type [blue]help[default] to see available commands.")
-		if memorySize <= 64 { // Probably useless but whatever
-			colorstring.Println("[yellow]WARNING:[default] Memory might be too small!")
-		}
+		colorstring.Println("Type [cyan]help[default] to see available commands.")
 
 		for true {
 			fmt.Print(">>> ")
@@ -372,17 +338,26 @@ func main() {
 
 			if strings.HasPrefix(repl, "help") {
 				// TODO: Add more commands
-				fmt.Println("List of available commands:")
-				colorstring.Println("[blue]help[default] - print this")
-				colorstring.Println("[blue]clear[default] - clear memory cells")
-				colorstring.Println("[blue]viewmem[default] - displays values of memory cells, cell highlighted in [green]green[default] is the cell currently pointed to")
+				colorstring.Println("[underline]General commands:[default]")
+				colorstring.Println("[cyan]help[default] - Displays this list")
+				colorstring.Println("[cyan]exit[default]/[cyan]quit[default] - Exits Goof")
+				colorstring.Println("[underline]Memory commands:[default]")
+				colorstring.Println("[cyan]clear[default] - Clears memory cells")
+				colorstring.Println("[cyan]dump[default] - Displays values of memory cells, cell highlighted in [green]green[default] is the cell currently pointed to")
 			} else if strings.HasPrefix(repl, "clear") {
-				cellptr = 0
+				*cellptr = 0
 				cells = make([]byte, memorySize)
-			} else if strings.HasPrefix(repl, "viewmem") {
-				dumpMem(&cells, &cellptr)
+			} else if strings.HasPrefix(repl, "dump") {
+				dumpMem(&cells, cellptr)
+			} else if strings.HasPrefix(repl, "exit") || strings.HasPrefix(repl, "quit") {
+				os.Exit(0)
 			} else {
-				execute(&cells, &cellptr, &repl)
+				switch execute(&cells, cellptr, repl, printStatistics, dumpMemory, optimize) {
+				case 1:
+					colorstring.Println("[_red_]ERROR:[_default_] Unmatched close bracket")
+				case 2:
+					colorstring.Println("[_red_]ERROR:[_default_] Unmatched open bracket")
+				}
 			}
 		}
 	}
